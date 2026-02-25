@@ -1,64 +1,146 @@
-# Import required libraries
-import os  # For creating directories and handling file paths
-import cv2  # OpenCV library for video capture and image processing
+"""
+Collect sign-language training images from your webcam.
 
-# Define the directory where data (images) will be stored
-DATA_DIR = './data'
+Features:
+  • Supports all 29 ASL classes (A-Z + DEL, NOTHING, SPACE)
+  • Choose which classes to collect
+  • Mirror mode for natural experience
+  • Resume-friendly: skips classes that already have enough images
+  • Live progress overlay
+"""
 
-# Check if the DATA_DIR exists; if not, create it
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+import os
+import cv2
 
-# Parameters for dataset collection
-number_of_classes = 5  # Number of classes to collect images for
-dataset_size = 100     # Number of images to collect per class
+from config import (
+    DATA_DIR, LABELS, NUM_CLASSES,
+    DATASET_SIZE_PER_CLASS,
+    COLOR_GREEN, COLOR_WHITE, COLOR_BLACK,
+)
 
-# Initialize the webcam (index 0 is usually the default camera)
-cap = cv2.VideoCapture(0)
 
-# Loop through the number of classes
-for j in range(number_of_classes):
-    # Create a directory for each class inside DATA_DIR
-    class_dir = os.path.join(DATA_DIR, str(j))
-    if not os.path.exists(class_dir):
-        os.makedirs(class_dir)
+def collect_images(
+    classes: list | None = None,
+    dataset_size: int = DATASET_SIZE_PER_CLASS,
+    camera_index: int = 0,
+    mirror: bool = True,
+):
+    """
+    Collect webcam images for the specified ASL classes.
 
-    print('Collecting data for class {}'.format(j))  # Notify user of the current class
+    Parameters
+    ----------
+    classes : list[int] | None
+        Class indices to collect (e.g. [0,1,2] for A,B,C).
+        None → collect ALL classes.
+    dataset_size : int
+        Number of images to capture per class.
+    camera_index : int
+        OpenCV camera device index.
+    mirror : bool
+        Flip frame horizontally for a natural "mirror" feel.
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
 
-    # Wait for user input to start collecting images
-    done = False
-    while True:
-        ret, frame = cap.read()  # Read a frame from the webcam
-        if not ret:
-            print("Failed to capture image")
-            continue  # Skip this loop iteration if frame capture fails
+    if classes is None:
+        classes = list(range(NUM_CLASSES))
 
-        # Display a message on the video feed to prompt user
-        cv2.putText(frame, 'Ready? Press "Q" ! :)', (100, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 255, 0), 3, cv2.LINE_AA)
-        cv2.imshow('frame', frame)  # Show the live webcam feed
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        print("[✗] Cannot open camera. Check your webcam connection.")
+        return
 
-        # Wait for the user to press 'q' to proceed
-        if cv2.waitKey(25) == ord('q'):
-            break
+    for class_idx in classes:
+        label = LABELS.get(class_idx, str(class_idx))
+        class_dir = os.path.join(DATA_DIR, str(class_idx))
+        os.makedirs(class_dir, exist_ok=True)
 
-    # Start capturing images for the current class
-    counter = 0  # Initialize the image counter
-    while counter < dataset_size:
-        ret, frame = cap.read()  # Capture a new frame
-        if not ret:
-            print("Failed to capture image")
+        # Skip classes that already have enough images
+        existing = len([
+            f for f in os.listdir(class_dir)
+            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+        ])
+        if existing >= dataset_size:
+            print(f"  Class {class_idx} ({label}) already has {existing} images – skipping.")
             continue
 
-        cv2.imshow('frame', frame)  # Show the live feed for confirmation
+        print(f"\n▶  Class {class_idx} – '{label}'  ({existing}/{dataset_size} images exist)")
 
-        # Save the captured frame to the class directory
-        img_path = os.path.join(class_dir, '{}.jpg'.format(counter))
-        cv2.imwrite(img_path, frame)
+        # ── Wait for user to be ready ──
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            if mirror:
+                frame = cv2.flip(frame, 1)
 
-        counter += 1  # Increment the counter
-        cv2.waitKey(25)  # Small delay to control capture speed
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (frame.shape[1], 80), COLOR_BLACK, -1)
+            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
 
-# Release the webcam and close all OpenCV windows
-cap.release()
-cv2.destroyAllWindows()
+            msg = f"Class {class_idx}: '{label}'  –  Press Q to start"
+            cv2.putText(frame, msg, (20, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, COLOR_GREEN, 2, cv2.LINE_AA)
+            cv2.imshow('Collect Images', frame)
+
+            if cv2.waitKey(25) & 0xFF == ord('q'):
+                break
+
+        # ── Capture images ──
+        counter = existing
+        while counter < dataset_size:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            if mirror:
+                frame = cv2.flip(frame, 1)
+
+            # Progress overlay
+            progress = f"{counter + 1}/{dataset_size}"
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (frame.shape[1], 50), COLOR_BLACK, -1)
+            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+            cv2.putText(frame, f"'{label}'  {progress}", (20, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_WHITE, 2, cv2.LINE_AA)
+
+            # Progress bar
+            bar_w = int((counter + 1) / dataset_size * (frame.shape[1] - 40))
+            cv2.rectangle(frame, (20, 45), (20 + bar_w, 48), COLOR_GREEN, -1)
+
+            cv2.imshow('Collect Images', frame)
+
+            img_path = os.path.join(class_dir, f'{counter}.jpg')
+            cv2.imwrite(img_path, frame)
+            counter += 1
+            cv2.waitKey(25)
+
+        print(f"  [✓] Collected {counter} images for '{label}'")
+
+    cap.release()
+    cv2.destroyAllWindows()
+    print("\n[✓] Image collection complete!\n")
+
+
+# ─────────────────────────────────────────────────────────────
+if __name__ == '__main__':
+    print("=" * 50)
+    print("  ASL Image Collector")
+    print("=" * 50)
+    print(f"\nAvailable classes ({NUM_CLASSES}):")
+    for idx, lbl in LABELS.items():
+        print(f"  {idx:>2d} → {lbl}")
+
+    choice = input(
+        "\nEnter class numbers to collect (comma-separated),\n"
+        "or press ENTER to collect ALL: "
+    ).strip()
+
+    if choice:
+        selected = [int(c.strip()) for c in choice.split(',') if c.strip().isdigit()]
+    else:
+        selected = None
+
+    size = input(f"Images per class [{DATASET_SIZE_PER_CLASS}]: ").strip()
+    size = int(size) if size.isdigit() else DATASET_SIZE_PER_CLASS
+
+    collect_images(classes=selected, dataset_size=size)

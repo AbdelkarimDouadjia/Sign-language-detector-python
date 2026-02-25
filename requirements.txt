@@ -1,3 +1,9 @@
-opencv-python==4.8.1.78
+opencv-python
 mediapipe==0.10.18
-scikit-learn==1.5.2
+scikit-learn
+numpy
+tqdm
+kagglehub
+pyttsx3
+edge-tts
+pygame

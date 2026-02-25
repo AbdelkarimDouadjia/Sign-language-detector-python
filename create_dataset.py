@@ -1,79 +1,109 @@
-# Import required libraries
-import os         # For working with file and directory paths
-import pickle     # For saving data to a file
-import mediapipe as mp  # Mediapipe for hand landmarks detection
-import cv2        # OpenCV for image reading and processing
+"""
+Extract hand-landmark features from images and save as a pickle dataset.
 
-# Initialize Mediapipe Hands solution
-mp_hands = mp.solutions.hands  # Mediapipe Hands module
-hands = mp_hands.Hands(
-    static_image_mode=True,            # Process static images (not video streams)
-    min_detection_confidence=0.3       # Minimum confidence for hand detection
+Improvements over the original:
+  • Fixed feature vector size (42 = 21 landmarks × 2 coords) regardless of
+    how many hands are visible — only the first / right hand is used.
+  • Progress bar via tqdm.
+  • Robust error handling and skip logging.
+"""
+
+import os
+import pickle
+import cv2
+import mediapipe as mp
+import numpy as np
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None          # graceful fallback
+
+from config import (
+    DATA_DIR, DATASET_PATH, NUM_FEATURES,
+    MIN_DETECTION_CONFIDENCE,
 )
 
-# Directory where image data is stored
-DATA_DIR = './data'
 
-# Lists to store processed data and their respective labels
-data = []   # Processed hand landmark coordinates
-labels = [] # Corresponding class labels (directory names)
+def extract_features(data_dir: str = DATA_DIR,
+                     output_path: str = DATASET_PATH):
+    """
+    Walk through data_dir/<class>/<image> and extract MediaPipe hand
+    landmarks as normalised (x, y) pairs.  Returns and saves the dataset.
+    """
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=True,
+        max_num_hands=1,                       # one hand → consistent features
+        min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+    )
 
-# Loop through each directory inside DATA_DIR
-for dir_ in os.listdir(DATA_DIR):
-    dir_path = os.path.join(DATA_DIR, dir_)  # Full path of the current directory
+    data = []
+    labels = []
+    skipped = 0
 
-    # Skip if the current file is not a directory
-    if not os.path.isdir(dir_path):
-        print(f"Skipping non-directory file: {dir_path}")
-        continue
+    # Gather all (class_dir, image_file) pairs for progress tracking
+    tasks = []
+    for dir_name in sorted(os.listdir(data_dir)):
+        dir_path = os.path.join(data_dir, dir_name)
+        if not os.path.isdir(dir_path):
+            continue
+        for img_name in os.listdir(dir_path):
+            if img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                tasks.append((dir_name, os.path.join(dir_path, img_name)))
 
-    # Loop through each image file in the current directory
-    for img_path in os.listdir(dir_path):
-        data_aux = []  # Temporary list to hold normalized hand landmarks
-        x_ = []        # List to store x-coordinates of landmarks
-        y_ = []        # List to store y-coordinates of landmarks
+    if not tasks:
+        print("[✗] No images found in", data_dir)
+        return
 
-        file_path = os.path.join(dir_path, img_path)  # Full path of the image file
+    print(f"\n▶  Processing {len(tasks)} images from {data_dir} …\n")
 
-        # Read the image using OpenCV
+    iterator = tqdm(tasks, desc="Extracting", unit="img") if tqdm else tasks
+
+    for class_label, file_path in iterator:
         img = cv2.imread(file_path)
-
-        # Check if the image was loaded successfully
         if img is None:
-            print(f"Warning: Unable to read file '{file_path}'. Skipping.")
+            skipped += 1
             continue
 
-        # Convert the image from BGR to RGB (required by Mediapipe)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        # Process the image with Mediapipe to detect hand landmarks
         results = hands.process(img_rgb)
 
-        # If hand landmarks are detected
-        if results.multi_hand_landmarks:
-            # Loop through detected hands (one or more)
-            for hand_landmarks in results.multi_hand_landmarks:
-                # Extract x and y coordinates of each landmark
-                for i in range(len(hand_landmarks.landmark)):
-                    x = hand_landmarks.landmark[i].x  # Normalized x-coordinate
-                    y = hand_landmarks.landmark[i].y  # Normalized y-coordinate
+        if not results.multi_hand_landmarks:
+            skipped += 1
+            continue
 
-                    x_.append(x)  # Store x-coordinates
-                    y_.append(y)  # Store y-coordinates
+        # Use the first detected hand
+        hand = results.multi_hand_landmarks[0]
+        x_coords = [lm.x for lm in hand.landmark]
+        y_coords = [lm.y for lm in hand.landmark]
+        min_x, min_y = min(x_coords), min(y_coords)
 
-                # Normalize landmarks relative to the smallest x and y values
-                for i in range(len(hand_landmarks.landmark)):
-                    x = hand_landmarks.landmark[i].x
-                    y = hand_landmarks.landmark[i].y
-                    data_aux.append(x - min(x_))  # Normalize x
-                    data_aux.append(y - min(y_))  # Normalize y
+        features = []
+        for lm in hand.landmark:
+            features.append(lm.x - min_x)
+            features.append(lm.y - min_y)
 
-            # Append the processed landmarks and label to their respective lists
-            data.append(data_aux)  # Store normalized hand landmarks
-            labels.append(dir_)    # Store the class label (directory name)
+        # Safety check — should always be 42
+        if len(features) != NUM_FEATURES:
+            skipped += 1
+            continue
 
-# Save the processed data and labels to a file using pickle
-with open('data.pickle', 'wb') as f:
-    pickle.dump({'data': data, 'labels': labels}, f)
+        data.append(features)
+        labels.append(class_label)
 
-print("Dataset creation complete. Data saved to 'data.pickle'.")
+    hands.close()
+
+    print(f"\n[✓] Extracted {len(data)} samples  ({skipped} images skipped)")
+
+    # Save dataset
+    with open(output_path, 'wb') as f:
+        pickle.dump({'data': data, 'labels': labels}, f)
+
+    print(f"[✓] Dataset saved to {output_path}\n")
+    return data, labels
+
+
+# ─────────────────────────────────────────────────────────────
+if __name__ == '__main__':
+    extract_features()
